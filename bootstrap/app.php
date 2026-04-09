@@ -39,6 +39,13 @@ return Application::configure(basePath: dirname(__DIR__))
             }
         });
 
+        // Catch login route redirect failure (Sanctum without Accept: application/json)
+        $exceptions->renderable(function (\Symfony\Component\Routing\Exception\RouteNotFoundException $e, $request) {
+            if ($request->is('api/*')) {
+                return response()->json(['message' => 'Unauthenticated.'], 401);
+            }
+        });
+
         $exceptions->renderable(function (\Illuminate\Database\Eloquent\ModelNotFoundException $e, $request) {
             if ($request->expectsJson() || $request->is('api/*')) {
                 return response()->json(['message' => 'Resource not found.'], 404);
@@ -57,6 +64,14 @@ return Application::configure(basePath: dirname(__DIR__))
                     'message' => 'Too many requests. Please try again later.',
                     'retry_after' => $e->getHeaders()['Retry-After'] ?? 60,
                 ], 429);
+            }
+        });
+
+        // Catch-all for any unhandled exceptions on API routes
+        $exceptions->renderable(function (\Throwable $e, $request) {
+            if ($request->is('api/*') && !$request->expectsJson()) {
+                $status = method_exists($e, 'getStatusCode') ? $e->getStatusCode() : 500;
+                return response()->json(['message' => 'Server error.'], $status);
             }
         });
     })->create();
