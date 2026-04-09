@@ -79,11 +79,16 @@ try {
     // ── Resolve make (by ID or name) ──────────────────────
     $makeId = $input['make_id'] ?? null;
     $makeName = $input['make'] ?? null;
+    $makeType = $input['make_type'] ?? 'car';
     if (!$makeId && $makeName) {
-        $make = VehicleMake::firstOrCreate(
-            ['name' => $makeName],
-            ['slug' => Str::slug($makeName), 'type' => 'car']
-        );
+        $make = VehicleMake::where('name', $makeName)->first();
+        if (!$make) {
+            $make = VehicleMake::create([
+                'name' => $makeName,
+                'slug' => Str::slug($makeName),
+                'type' => $makeType,
+            ]);
+        }
         $makeId = $make->id;
     }
 

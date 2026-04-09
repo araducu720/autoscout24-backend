@@ -24,7 +24,7 @@ return new class extends Migration
             });
         }
 
-        if (Schema::hasTable('users') && Schema::hasColumn('users', 'is_admin')) {
+        if (Schema::hasTable('users')) {
             Schema::table('users', function (Blueprint $table) {
                 $table->index('is_admin', 'idx_users_is_admin');
             });
