@@ -21,7 +21,13 @@ if (empty($secret) || !isset($_GET['key']) || !hash_equals($secret, $_GET['key']
 
 use App\Models\Vehicle;
 use App\Models\VehicleImage;
+use App\Models\VehicleMake;
+use App\Models\VehicleModel;
+use App\Models\Dealer;
+use App\Models\User;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 header('Content-Type: application/json');
 
@@ -31,6 +37,9 @@ if (isset($_GET['action']) && $_GET['action'] === 'status') {
         'total_vehicles' => Vehicle::count(),
         'active_vehicles' => Vehicle::where('status', 'active')->count(),
         'total_images' => VehicleImage::count(),
+        'total_makes' => VehicleMake::count(),
+        'total_models' => VehicleModel::count(),
+        'total_dealers' => class_exists(Dealer::class) ? Dealer::count() : 0,
     ]);
     exit;
 }
@@ -59,38 +68,137 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 try {
-    // Parse form data
-    $makeId = $_POST['make_id'] ?? null;
-    $modelId = $_POST['model_id'] ?? null;
-    $title = $_POST['title'] ?? '';
-    $description = $_POST['description'] ?? '';
-    $price = floatval($_POST['price'] ?? 0);
-    $year = intval($_POST['year'] ?? 2024);
-    $mileage = intval($_POST['mileage'] ?? 0);
-    $fuelType = $_POST['fuel_type'] ?? 'petrol';
-    $transmission = $_POST['transmission'] ?? 'manual';
-    $bodyType = $_POST['body_type'] ?? null;
-    $color = $_POST['color'] ?? null;
-    $doors = isset($_POST['doors']) ? intval($_POST['doors']) : null;
-    $seats = isset($_POST['seats']) ? intval($_POST['seats']) : null;
-    $engineSize = isset($_POST['engine_size']) ? intval($_POST['engine_size']) : null;
-    $power = isset($_POST['power']) ? intval($_POST['power']) : null;
-    $country = $_POST['country'] ?? null;
-    $city = $_POST['city'] ?? null;
-    $condition = $_POST['condition'] ?? 'used';
-    $features = isset($_POST['features']) ? json_decode($_POST['features'], true) : null;
+    // Support both JSON body and form data
+    $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+    if (stripos($contentType, 'application/json') !== false) {
+        $input = json_decode(file_get_contents('php://input'), true) ?? [];
+    } else {
+        $input = $_POST;
+    }
+
+    // ── Resolve make (by ID or name) ──────────────────────
+    $makeId = $input['make_id'] ?? null;
+    $makeName = $input['make'] ?? null;
+    if (!$makeId && $makeName) {
+        $make = VehicleMake::firstOrCreate(
+            ['name' => $makeName],
+            ['slug' => Str::slug($makeName), 'type' => 'car']
+        );
+        $makeId = $make->id;
+    }
+
+    // ── Resolve model (by ID or name) ─────────────────────
+    $modelId = $input['model_id'] ?? null;
+    $modelName = $input['model'] ?? null;
+    if (!$modelId && $modelName && $makeId) {
+        $model = VehicleModel::firstOrCreate(
+            ['make_id' => $makeId, 'name' => $modelName],
+            ['slug' => Str::slug($modelName)]
+        );
+        $modelId = $model->id;
+    }
+
+    $title = $input['title'] ?? '';
+    $description = $input['description'] ?? '';
+    $price = floatval($input['price'] ?? 0);
+    $year = intval($input['year'] ?? 2024);
+    $mileage = intval($input['mileage'] ?? 0);
+    $fuelType = $input['fuel_type'] ?? 'petrol';
+    $transmission = $input['transmission'] ?? 'manual';
+    $bodyType = $input['body_type'] ?? null;
+    $color = $input['color'] ?? null;
+    $doors = isset($input['doors']) ? intval($input['doors']) : null;
+    $seats = isset($input['seats']) ? intval($input['seats']) : null;
+    $engineSize = isset($input['engine_size']) ? intval($input['engine_size']) : null;
+    $power = isset($input['power']) ? intval($input['power']) : null;
+    $country = $input['country'] ?? null;
+    $city = $input['city'] ?? null;
+    $condition = $input['condition'] ?? 'used';
+    $driveType = $input['drive_type'] ?? null;
+    $co2Emissions = isset($input['co2_emissions']) ? intval($input['co2_emissions']) : null;
+    $emissionClass = $input['emission_class'] ?? null;
+    $fuelConsumption = isset($input['fuel_consumption']) ? floatval($input['fuel_consumption']) : null;
+    $previousOwners = isset($input['previous_owners']) ? intval($input['previous_owners']) : null;
+    $accidentFree = isset($input['accident_free']) ? (bool)$input['accident_free'] : null;
+
+    // Features - accept array or JSON string
+    $features = $input['features'] ?? null;
+    if (is_string($features)) {
+        $features = json_decode($features, true);
+    }
 
     if (!$makeId || !$modelId || !$title) {
         http_response_code(422);
-        echo json_encode(['error' => 'Missing required fields: make_id, model_id, title']);
+        echo json_encode(['error' => 'Missing required fields: make/make_id, model/model_id, title']);
         exit;
     }
 
-    // Create vehicle
+    // ── Dealer handling ───────────────────────────────────
+    $userId = 1; // default admin
+    $dealerInfo = $input['dealer_info'] ?? null;
+    $dealerCreated = false;
+
+    if ($dealerInfo && !empty($dealerInfo['company_name'])) {
+        DB::beginTransaction();
+        try {
+            // Find or create dealer user
+            $dealerEmail = $dealerInfo['email'] ?? null;
+            $dealerUser = null;
+
+            if ($dealerEmail) {
+                $dealerUser = User::where('email', $dealerEmail)->first();
+            }
+
+            if (!$dealerUser) {
+                // Create dealer user account
+                $dealerUser = User::create([
+                    'name' => $dealerInfo['company_name'],
+                    'email' => $dealerEmail ?: 'dealer_' . Str::random(8) . '@autoscout24.de',
+                    'password' => bcrypt(Str::random(32)),
+                    'role' => 'dealer',
+                    'email_verified_at' => now(),
+                ]);
+            }
+
+            // Find or create dealer profile
+            $dealer = Dealer::where('user_id', $dealerUser->id)->first();
+            if (!$dealer) {
+                $dealer = Dealer::create([
+                    'user_id' => $dealerUser->id,
+                    'company_name' => $dealerInfo['company_name'],
+                    'slug' => Str::slug($dealerInfo['company_name']) . '-' . Str::random(6),
+                    'phone' => $dealerInfo['phone'] ?? null,
+                    'email' => $dealerInfo['email'] ?? $dealerUser->email,
+                    'website' => $dealerInfo['website'] ?? null,
+                    'address' => $dealerInfo['address'] ?? null,
+                    'city' => $dealerInfo['city'] ?? $city,
+                    'postal_code' => $dealerInfo['postal_code'] ?? null,
+                    'country' => $dealerInfo['country'] ?? $country ?? 'DE',
+                    'latitude' => $dealerInfo['latitude'] ?? null,
+                    'longitude' => $dealerInfo['longitude'] ?? null,
+                    'logo' => $dealerInfo['logo'] ?? null,
+                    'description' => $dealerInfo['description'] ?? null,
+                    'type' => $dealerInfo['type'] ?? 'independent',
+                    'is_verified' => true,
+                    'is_active' => true,
+                ]);
+                $dealerCreated = true;
+            }
+
+            $userId = $dealerUser->id;
+            DB::commit();
+        } catch (\Throwable $e) {
+            DB::rollBack();
+            // Continue with default admin user
+        }
+    }
+
+    // ── Create vehicle ────────────────────────────────────
     $vehicle = Vehicle::create([
         'make_id' => $makeId,
         'model_id' => $modelId,
-        'title' => $title,
+        'user_id' => $userId,
+        'title' => Str::limit($title, 250),
         'description' => $description,
         'price' => $price,
         'year' => $year,
@@ -107,14 +215,39 @@ try {
         'city' => $city,
         'condition' => $condition,
         'status' => 'active',
-        'is_featured' => false,
-        'views_count' => rand(50, 500),
+        'is_featured' => (bool) rand(0, 9) === 0,
+        'views_count' => rand(50, 800),
         'features' => $features,
+        'drive_type' => $driveType,
+        'co2_emissions' => $co2Emissions,
+        'emission_class' => $emissionClass,
+        'fuel_consumption' => $fuelConsumption,
+        'previous_owners' => $previousOwners,
+        'accident_free' => $accidentFree,
     ]);
 
-    // Process uploaded images
+    // ── Process images ────────────────────────────────────
     $imageCount = 0;
-    if (!empty($_FILES['images'])) {
+
+    // Method 1: CDN image URLs (from JSON)
+    $imageUrls = $input['image_urls'] ?? [];
+    if (is_array($imageUrls) && !empty($imageUrls)) {
+        foreach (array_slice($imageUrls, 0, 30) as $index => $imageUrl) {
+            if (!is_string($imageUrl) || !filter_var($imageUrl, FILTER_VALIDATE_URL)) {
+                continue;
+            }
+            VehicleImage::create([
+                'vehicle_id' => $vehicle->id,
+                'image_path' => $imageUrl,
+                'is_primary' => $index === 0,
+                'order' => $index,
+            ]);
+            $imageCount++;
+        }
+    }
+
+    // Method 2: File uploads (multipart form)
+    if (!empty($_FILES['images']) && $imageCount === 0) {
         $files = $_FILES['images'];
         $fileCount = is_array($files['name']) ? count($files['name']) : 1;
         
@@ -125,15 +258,12 @@ try {
             
             if ($error !== UPLOAD_ERR_OK) continue;
             
-            // Store via Laravel Storage
             $ext = pathinfo($origName, PATHINFO_EXTENSION) ?: 'jpg';
             $filename = sprintf('%02d_%s.%s', $i + 1, uniqid(), $ext);
             $dir = "vehicles/{$vehicle->id}";
             
-            // Ensure directory exists
             Storage::disk('public')->makeDirectory($dir);
             
-            // Move file
             $path = "{$dir}/{$filename}";
             Storage::disk('public')->put($path, file_get_contents($tmpName));
             
@@ -151,7 +281,9 @@ try {
         'success' => true,
         'vehicle_id' => $vehicle->id,
         'title' => $vehicle->title,
-        'images_uploaded' => $imageCount,
+        'images_count' => $imageCount,
+        'dealer_created' => $dealerCreated,
+        'user_id' => $userId,
     ]);
 
 } catch (\Exception $e) {
