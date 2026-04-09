@@ -17,6 +17,7 @@ return Application::configure(basePath: dirname(__DIR__))
         // uses localStorage tokens, not cookie/session auth.
 
         $middleware->api(prepend: [
+            \App\Http\Middleware\ForceJsonResponse::class,
             \Illuminate\Routing\Middleware\ThrottleRequests::class.':api',
         ]);
 
